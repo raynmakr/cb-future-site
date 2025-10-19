@@ -1,30 +1,63 @@
 // functions/api/concierge.ts
 export interface Env { OPENAI_API_KEY: string }
 
-export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
+  // Health check
+  if (request.method === "GET") return json({ ok: true, route: "/api/concierge" });
+
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  let body: any;
   try {
-    const { message } = await request.json<any>();
-    if (!message || typeof message !== "string") return json({ error: "Missing 'message'" }, 400);
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON body" }, 400);
+  }
 
-    const system =
-      "You are the Clifton Blake KSA Concierge. Company focus: Global Private Equity Real Estate. " +
-      "Primary hubs: New York, Toronto, Riyadh. Be crisp, helpful, action-oriented.";
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (!message) return json({ error: "Missing 'message' (string) in body" }, 400);
 
+  // Check secret early so we don't mask errors as 400
+  if (!env.OPENAI_API_KEY || env.OPENAI_API_KEY.trim().length < 20) {
+    return json({ error: "OPENAI_API_KEY not configured" }, 500);
+  }
+
+  const system =
+    "You are the Clifton Blake KSA Concierge. Company focus: Global Private Equity Real Estate. " +
+    "Primary hubs: New York, Toronto, Riyadh. Be crisp, helpful, and action-oriented.";
+
+  try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        messages: [{ role: "system", content: system }, { role: "user", content: message }],
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: message },
+        ],
       }),
     });
 
-    if (!r.ok) return json({ error: "Upstream error", detail: await r.text() }, 502);
-    const data = await r.json();
-    return json({ reply: data?.choices?.[0]?.message?.content ?? "" });
-  } catch { return json({ error: "Bad request" }, 400); }
-};
+    if (!r.ok) {
+      const text = await r.text();
+      return json({ error: "OpenAI upstream error", status: r.status, detail: text.slice(0, 800) }, 502);
+    }
 
-function json(obj: unknown, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
-}
+    const data = await r.json();
+    const reply = data?.choices?.[0]?.message?.content ?? "(no content)";
+    return json({ reply });
+  } catch (err: any) {
+    return json({ error: "Unhandled server error", detail: String(err?.message || err) }, 500);
+  }
+};
