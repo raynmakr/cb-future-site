@@ -1,4 +1,5 @@
-import React, { useEffect, useState, PropsWithChildren } from "react";
+import { useEffect, useState } from "react";
+import type { PropsWithChildren } from "react";
 import { motion } from "framer-motion";
 import { Bot, Sparkles, Send } from "lucide-react";
 
