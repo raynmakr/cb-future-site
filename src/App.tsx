@@ -3,23 +3,19 @@ import type { PropsWithChildren } from "react";
 import { motion } from "framer-motion";
 import { Bot, Sparkles, Send } from "lucide-react";
 
-// ————————————————————————————————————————————
-// WEBSITE OF THE FUTURE — Minimal landing + Concierge chat
-// On load: fades from light → dark, then reveals a Concierge prompt.
-// Now includes a chat box wired to a backend endpoint you control.
-// To connect this to your GPT, implement /api/concierge on your server and
-// proxy to the OpenAI API (Responses/Assistants). Do NOT expose secrets.
-// ————————————————————————————————————————————
+// Minimal landing + Concierge chat
+// - On load: fades from light to dark
+// - Chat supports streaming (SSE) and non-streaming JSON
+// - Grounded toggle sends strict=true to backend to force retrieval
 
-const PROXY_URL = "/api/concierge"; // ← implement this on your server
-const GPT_SHARE_URL =
-  "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
+const PROXY_URL = "/api/concierge";
+const GPT_SHARE_URL = "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
+const LOGO_SRC = "/cb-logo.png"; // put your logo at public/cb-logo.png
 
-// Helper: parse a single SSE line; return text delta or null.
+// Parse a single Server-Sent-Event line and return a text delta, or null
 function extractDeltaFromSSELine(line: string): string | null {
-  // Only process data lines; ignore event:, id:, retry:, and blanks
-  if (!/^data:/i.test(line)) return null;
-  const payload = line.replace(/^data:\\s?/i, "").trim();
+  if (!/^data:/i.test(line)) return null; // ignore event:, id:, retry:
+  const payload = line.replace(/^data:\s?/i, "").trim();
   if (!payload || payload === "[DONE]") return null;
   try {
     const evt = JSON.parse(payload);
@@ -27,61 +23,38 @@ function extractDeltaFromSSELine(line: string): string | null {
     if (typeof evt?.text === "string") return evt.text;
     return null;
   } catch {
-    // If it isn't JSON, ignore (do not render event names)
+    // not JSON - ignore (prevents raw "event:" noise)
     return null;
   }
 }
 
-// Streaming client: expects backend to stream text (SSE/NDJSON/plain chunks) expects backend to stream text (SSE/NDJSON/plain chunks)
-async function streamConciergeAPI(
-  prompt: string,
-  onDelta: (chunk: string) => void
-): Promise<{ final: string; sources?: string[] }> {
-  const res = await fetch(PROXY_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: prompt, stream: true }),
-  });
+function Container({ children }: PropsWithChildren) {
+  return <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">{children}</div>;
+}
 
-  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
-  const contentType = res.headers.get("Content-Type") || "";
-
-  // Handle streaming content types
-  if (
-    contentType.includes("text/event-stream") ||
-    contentType.includes("text/plain") ||
-    contentType.includes("application/x-ndjson")
-  ) {
-    const reader = res.body?.getReader();
-    const decoder = new TextDecoder();
-    let final = "";
-    if (!reader) return { final };
-    let buffer = "";
-   — Concierge Chat Types ———
+// Types
 interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  sources?: string[]; // optional citations list
+  sources?: string[]; // optional citations from backend
 }
 
 function ConciergeCard() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [grounded, setGrounded] = useState(true); // docs-only mode
   const logRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   function scrollToBottom(smooth = true) {
     const log = logRef.current;
     if (!log) return;
-    const behavior = smooth ? ("smooth" as const) : ("auto" as const);
-    log.scrollTo({ top: log.scrollHeight, behavior });
+    log.scrollTo({ top: log.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }
 
-  async function callConciergeAPI(
-    prompt: string
-  ): Promise<{ reply: string; sources?: string[] }> {
+  async function callConciergeAPI(prompt: string): Promise<{ reply: string; sources?: string[] }> {
     try {
       const res = await fetch(PROXY_URL, {
         method: "POST",
@@ -89,37 +62,75 @@ function ConciergeCard() {
           "Content-Type": "application/json",
           "X-Concierge-GPT": GPT_SHARE_URL,
         },
-        body: JSON.stringify({ message: prompt }),
+        body: JSON.stringify({ message: prompt, strict: grounded }),
       });
       if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
       const data = await res.json();
-      if (typeof data?.reply === "string")
-        return { reply: data.reply, sources: data?.sources };
+      if (typeof data?.reply === "string") return { reply: data.reply, sources: data?.sources };
       throw new Error("Malformed response from proxy");
-    } catch (err) {
-      return {
-        reply:
-          "(demo) I’m ready to assist with Global Private Equity Real Estate across New York, Toronto, and Riyadh. Connect the backend to enable real replies from the Concierge GPT.",
-      };
+    } catch {
+      return { reply: "(demo) Ready to assist. Connect the backend for real replies." };
     }
+  }
+
+  async function streamConciergeAPI(
+    prompt: string,
+    onDelta: (chunk: string) => void
+  ): Promise<{ final: string; sources?: string[] }> {
+    const res = await fetch(PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: prompt, stream: true, strict: grounded }),
+    });
+    if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
+
+    const ct = res.headers.get("Content-Type") || "";
+    if (ct.includes("text/event-stream") || ct.includes("text/plain") || ct.includes("application/x-ndjson")) {
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let final = "";
+      if (!reader) return { final };
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || ""; // keep last partial
+        for (const raw of lines) {
+          const delta = extractDeltaFromSSELine(raw);
+          if (delta) {
+            final += delta;
+            onDelta(delta);
+          }
+        }
+      }
+      // process tail if it is a complete data line
+      const tail = extractDeltaFromSSELine(buffer);
+      if (tail) {
+        final += tail;
+        onDelta(tail);
+      }
+      return { final };
+    }
+
+    // fallback JSON
+    const data = await res.json();
+    return { final: data?.reply ?? "", sources: Array.isArray(data?.sources) ? data.sources : undefined };
   }
 
   async function handleSend() {
     const text = input.trim();
     if (!text || loading) return;
 
-    // 1) Add user message immediately
-    const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: text,
-    };
+    // user bubble
+    const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text };
     setMessages((m) => [...m, userMsg]);
     setInput("");
     inputRef.current?.focus();
     requestAnimationFrame(() => scrollToBottom(true));
 
-    // 2) Add assistant placeholder to stream into
+    // assistant placeholder
     const botId = crypto.randomUUID();
     setMessages((m) => [...m, { id: botId, role: "assistant", content: "" }]);
 
@@ -128,45 +139,31 @@ function ConciergeCard() {
       let gotDelta = false;
       const result = await streamConciergeAPI(text, (delta) => {
         gotDelta = true;
-        setMessages((m) =>
-          m.map((msg) => (msg.id === botId ? { ...msg, content: msg.content + delta } : msg))
-        );
+        setMessages((m) => m.map((msg) => (msg.id === botId ? { ...msg, content: msg.content + delta } : msg)));
         requestAnimationFrame(() => scrollToBottom(true));
       });
 
-      // If we didn't receive streaming chunks, use the final text (non-stream JSON path)
       if (!gotDelta && result.final) {
-        setMessages((m) =>
-          m.map((msg) => (msg.id === botId ? { ...msg, content: result.final } : msg))
-        );
+        setMessages((m) => m.map((msg) => (msg.id === botId ? { ...msg, content: result.final } : msg)));
       }
       if (result.sources) {
-        setMessages((m) =>
-          m.map((msg) => (msg.id === botId ? { ...msg, sources: result.sources } : msg))
-        );
+        setMessages((m) => m.map((msg) => (msg.id === botId ? { ...msg, sources: result.sources } : msg)));
       }
-
-      // If still empty (no delta & no final), fall back once to non-streaming API
-      const botMsg = messages.find((m) => m.id === botId);
-      if (!gotDelta && (!botMsg || !botMsg.content)) {
+      // if still empty, hard fallback
+      const current = messages.find((m) => m.id === botId);
+      if (!gotDelta && (!current || !current.content)) {
         const { reply, sources } = await callConciergeAPI(text);
-        setMessages((m) =>
-          m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg))
-        );
+        setMessages((m) => m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg)));
       }
-    } catch (e) {
-      // Fallback to non-streaming mode on any error
+    } catch {
       const { reply, sources } = await callConciergeAPI(text);
-      setMessages((m) =>
-        m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg))
-      );
+      setMessages((m) => m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg)));
     } finally {
       setLoading(false);
       requestAnimationFrame(() => scrollToBottom(true));
     }
   }
 
-  // Also auto-scroll whenever messages or loading state changes (catch-all)
   useEffect(() => {
     scrollToBottom(false);
   }, [messages, loading]);
@@ -190,7 +187,6 @@ function ConciergeCard() {
         className="mb-4 max-h-64 space-y-3 overflow-y-auto pr-1 overscroll-contain"
         data-testid="chat-log"
         aria-live="polite"
-        aria-atomic="false"
       >
         {messages.length === 0 ? (
           <div className="text-sm text-white/80 md:text-base">How may I assist you?</div>
@@ -207,16 +203,14 @@ function ConciergeCard() {
                 {m.content}
               </div>
               {m.role === "assistant" && m.sources && m.sources.length > 0 && (
-                <div className="mt-1 mr-auto w-fit text-[11px] text-white/60">
-                  Sources: {m.sources.join(", ")}
-                </div>
+                <div className="mt-1 mr-auto w-fit text-[11px] text-white/60">Sources: {m.sources.join(", ")}</div>
               )}
             </div>
           ))
         )}
         {loading && (
           <div className="mr-auto w-fit max-w-full animate-pulse rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
-            Thinking…
+            Thinking...
           </div>
         )}
       </div>
@@ -226,7 +220,7 @@ function ConciergeCard() {
         <input
           ref={inputRef}
           className="h-11 flex-1 rounded-xl border border-white/15 bg-white/10 px-3 text-white/90 placeholder-white/50 outline-none backdrop-blur-md"
-          placeholder="Type a request…"
+          placeholder="Type a request..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -249,28 +243,23 @@ function ConciergeCard() {
 
       {/* Grounded mode toggle */}
       <label className="mt-2 inline-flex select-none items-center gap-2 text-xs text-white/70" data-testid="grounded-toggle">
-        <input
-          type="checkbox"
-          className="h-3.5 w-3.5 accent-white/80"
-          checked={grounded}
-          onChange={(e) => setGrounded(e.target.checked)}
-        />
+        <input type="checkbox" className="h-3.5 w-3.5 accent-white/80" checked={grounded} onChange={(e) => setGrounded(e.target.checked)} />
         <span>Grounded mode (use docs only)</span>
       </label>
 
-      {/* Optional: open the GPT in ChatGPT (auth required) */}
+      {/* Open GPT link */}
       <div className="mt-3 text-xs text-white/60">
-        Prefer the full ChatGPT experience? <a className="underline" href={GPT_SHARE_URL} target="_blank" rel="noreferrer noopener">Open the Concierge GPT</a>.
+        Prefer the full ChatGPT experience? <a className="underline" href={GPT_SHARE_URL} target="_blank" rel="noreferrer noopener" data-testid="gpt-link">Open the Concierge GPT</a>.
       </div>
     </motion.div>
   );
 }
 
-export default function CorporateWebsite() {
+export default function App() {
   const [isDark, setIsDark] = useState(false);
 
   useEffect(() => {
-    const t = setTimeout(() => setIsDark(true), 900); // delay before dark mode kicks in
+    const t = setTimeout(() => setIsDark(true), 900);
     return () => clearTimeout(t);
   }, []);
 
@@ -278,30 +267,15 @@ export default function CorporateWebsite() {
     <div
       id="app-root"
       data-theme={isDark ? "dark" : "light"}
-      className={[
-        "min-h-screen transition-colors duration-1000",
-        isDark ? "bg-neutral-950 text-neutral-100" : "bg-white text-neutral-900",
-      ].join(" ")}
+      className={["min-h-screen transition-colors duration-1000", isDark ? "bg-neutral-950 text-neutral-100" : "bg-white text-neutral-900"].join(" ")}
     >
       {/* Ambient gradients */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden" aria-hidden>
-        {/* light glow (visible before fade) */}
-        <motion.div
-          initial={{ opacity: 0.35 }}
-          animate={{ opacity: isDark ? 0 : 0.35 }}
-          transition={{ duration: 1.0 }}
-          className="absolute -left-20 -top-24 h-80 w-80 rounded-full bg-indigo-300/40 blur-3xl"
-        />
-        {/* dark glow (emerges after fade) */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: isDark ? 0.25 : 0 }}
-          transition={{ duration: 1.0 }}
-          className="absolute right-0 top-1/3 h-[32rem] w-[32rem] rounded-full bg-blue-500/20 blur-3xl"
-        />
+        <motion.div initial={{ opacity: 0.35 }} animate={{ opacity: isDark ? 0 : 0.35 }} transition={{ duration: 1 }} className="absolute -left-20 -top-24 h-80 w-80 rounded-full bg-indigo-300/40 blur-3xl" />
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: isDark ? 0.25 : 0 }} transition={{ duration: 1 }} className="absolute right-0 top-1/3 h-[32rem] w-[32rem] rounded-full bg-blue-500/20 blur-3xl" />
       </div>
 
-      {/* Centered hero */}
+      {/* Hero */}
       <main className="grid min-h-screen place-items-center">
         <Container>
           <div className="flex flex-col items-center text-center">
@@ -361,55 +335,34 @@ export default function CorporateWebsite() {
         </Container>
       </main>
 
-      {/* ——— Lightweight Runtime Tests (dev-friendly) ——— */}
       <DevTests />
     </div>
   );
 }
 
-/**
- * DevTests: very lightweight runtime assertions to validate expected behavior.
- * These are not unit tests, but they help ensure the page renders as intended.
- * Results are printed to the browser console.
- */
+// Lightweight runtime assertions (printed in console)
 function DevTests() {
   useEffect(() => {
     const root = document.getElementById("app-root");
     console.groupCollapsed("[DevTests] Website of the Future");
 
-    // Test 1: Concierge card exists
     const concierge = document.querySelector('[data-testid="concierge-card"]');
     console.assert(!!concierge, "Concierge card should render");
 
-    // Test 2: Chat input and button exist
     const input = document.querySelector('[data-testid="chat-input-row"] input') as HTMLInputElement | null;
     const button = document.querySelector('[data-testid="chat-input-row"] button');
-    console.assert(
-      !!input && input.placeholder.includes("Type a request"),
-      "Chat input should be present with placeholder"
-    );
+    console.assert(!!input && input.placeholder.includes("Type a request"), "Chat input should be present with placeholder");
     console.assert(!!button, "Send button should be present");
-
-    // Test 3b: Send should be disabled when input is empty
     const sendBtn = button as HTMLButtonElement | null;
     console.assert(!!sendBtn && sendBtn.disabled === true, "Send should be disabled initially when input is empty");
 
-    // Test 3: Tagline text matches
     const tagline = document.querySelector('[data-testid="tagline"]');
-    console.assert(
-      !!tagline && tagline.textContent?.includes("Global Private Equity Real Estate"),
-      "Tagline should be present and correct"
-    );
+    console.assert(!!tagline && tagline.textContent?.includes("Global Private Equity Real Estate"), "Tagline should be present and correct");
 
-    // Test 4: Cities line contains all locations
     const cities = document.querySelector('[data-testid="cities"]');
-    const citiesOk =
-      cities?.textContent?.includes("New York") &&
-      cities?.textContent?.includes("Toronto") &&
-      cities?.textContent?.includes("Riyadh");
+    const citiesOk = cities?.textContent?.includes("New York") && cities?.textContent?.includes("Toronto") && cities?.textContent?.includes("Riyadh");
     console.assert(!!citiesOk, "Cities list should include New York, Toronto, Riyadh");
 
-    // Test 5: Theme should fade to dark after ~900ms
     const initialTheme = root?.getAttribute("data-theme");
     console.assert(initialTheme === "light", "Initial theme should be light");
 
@@ -417,44 +370,21 @@ function DevTests() {
       const laterTheme = root?.getAttribute("data-theme");
       console.assert(laterTheme === "dark", "Theme should switch to dark after delay");
 
-      // Added Tests — ensure accessibility and link presence
-      // Test 6: chat log is aria-live polite for screen readers
-      const chatLog = document.querySelector('[data-testid="chat-log"]');
-      console.assert(
-        chatLog?.getAttribute("aria-live") === "polite",
-        "Chat log should be aria-live=polite"
-      );
-      // Test 7: GPT link exists
       const gptLink = document.querySelector('[data-testid="gpt-link"]') as HTMLAnchorElement | null;
       console.assert(!!gptLink && gptLink.href.includes("chatgpt.com"), "GPT link should be present");
 
-      // Test 8: Logo exists and has src + alt
       const logo = document.querySelector('[data-testid="cb-logo"]') as HTMLImageElement | null;
-      console.assert(!!logo && !!logo?.getAttribute("src"), "Logo should render with a src");
+      console.assert(!!logo && !!logo.getAttribute("src"), "Logo should render with a src");
       console.assert(!!logo && (logo.alt || "").toLowerCase().includes("clifton"), "Logo should have descriptive alt text");
 
-      // Fetch server debug to verify vector store wiring (non-blocking)
-      fetch('/api/concierge?debug=1')
-        .then(r => r.ok ? r.json() : null)
-        .then(info => {
-          if (!info) return;
-          console.log('[Debug] /api/concierge?debug=1 →', info);
-          if (info?.hasKey !== true) {
-            console.warn('OPENAI_API_KEY is not bound on the server');
-          }
-          if (info?.vectorStore?.id) {
-            console.assert(
-              typeof info.vectorStore.files === 'number',
-              'Vector store should return a file count'
-            );
-          } else {
-            console.warn('VECTOR_STORE_ID is not configured on the server');
-          }
-        })
+      // Debug ping (best-effort): prints when backend has debug implemented
+      fetch("/api/concierge?debug=1")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((info) => info && console.log("[Debug] /api/concierge?debug=1 →", info))
         .catch(() => undefined);
 
       console.groupEnd();
-    }, 1200); // allow buffer beyond 900ms
+    }, 1200);
 
     return () => clearTimeout(timeout);
   }, []);
