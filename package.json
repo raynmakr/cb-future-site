@@ -7,9 +7,9 @@
   
   "scripts": {
     "dev": "vite",
-    "build": "vite build",           // keep CI lean
+    "build": "vite build",           
     "preview": "vite preview",
-    "typecheck": "tsc -b"            // run locally when you want
+    "typecheck": "tsc -b"            
   },
   "dependencies": {
     "framer-motion": "^12.23.24",
