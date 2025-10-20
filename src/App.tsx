@@ -8,12 +8,79 @@ import { Bot, Sparkles, Send } from "lucide-react";
 // On load: fades from light → dark, then reveals a Concierge prompt.
 // Now includes a chat box wired to a backend endpoint you control.
 // To connect this to your GPT, implement /api/concierge on your server and
-// proxy to the OpenAI API (Assistants or Chat Completions). Do NOT expose
-// secrets in the browser.
+// proxy to the OpenAI API (Responses/Assistants). Do NOT expose secrets.
 // ————————————————————————————————————————————
 
 const PROXY_URL = "/api/concierge"; // ← implement this on your server
-const GPT_SHARE_URL = "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
+const GPT_SHARE_URL =
+  "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
+
+// Streaming client: expects backend to stream text (SSE/NDJSON/plain chunks)
+async function streamConciergeAPI(
+  prompt: string,
+  onDelta: (chunk: string) => void
+): Promise<{ final: string; sources?: string[] }> {
+  const res = await fetch(PROXY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: prompt, stream: true }),
+  });
+
+  if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
+  const contentType = res.headers.get("Content-Type") || "";
+
+  // Handle streaming content types
+  if (
+    contentType.includes("text/event-stream") ||
+    contentType.includes("text/plain") ||
+    contentType.includes("application/x-ndjson")
+  ) {
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let final = "";
+    if (!reader) return { final };
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      // ✅ Correct newlines regex (previous version had corrupted CR/LF chars)
+      const parts = buffer.split(/\r?\n\r?\n|\r?\n/);
+      buffer = parts.pop() || ""; // keep last partial
+      for (const line of parts) {
+        const trimmed = line.replace(/^data:\s?/, "");
+        if (!trimmed) continue;
+        try {
+          const evt = JSON.parse(trimmed);
+          if (typeof evt.delta === "string") {
+            final += evt.delta;
+            onDelta(evt.delta);
+          } else if (typeof evt.text === "string") {
+            final += evt.text;
+            onDelta(evt.text);
+          }
+          // if evt.sources present, we attach after stream ends
+        } catch {
+          final += trimmed;
+          onDelta(trimmed);
+        }
+      }
+    }
+    if (buffer) {
+      final += buffer;
+      onDelta(buffer);
+    }
+    return { final };
+  }
+
+  // Fallback to JSON response
+  const data = await res.json();
+  return {
+    final: data?.reply ?? "",
+    sources: Array.isArray(data?.sources) ? data.sources : undefined,
+  };
+}
 
 function Container({ children }: PropsWithChildren) {
   return <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">{children}</div>;
@@ -24,6 +91,7 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  sources?: string[]; // optional citations list
 }
 
 function ConciergeCard() {
@@ -37,11 +105,12 @@ function ConciergeCard() {
     const log = logRef.current;
     if (!log) return;
     const behavior = smooth ? ("smooth" as const) : ("auto" as const);
-    // Scroll container to bottom
     log.scrollTo({ top: log.scrollHeight, behavior });
   }
 
-  async function callConciergeAPI(prompt: string): Promise<string> {
+  async function callConciergeAPI(
+    prompt: string
+  ): Promise<{ reply: string; sources?: string[] }> {
     try {
       const res = await fetch(PROXY_URL, {
         method: "POST",
@@ -53,10 +122,14 @@ function ConciergeCard() {
       });
       if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
       const data = await res.json();
-      if (typeof data?.reply === "string") return data.reply;
+      if (typeof data?.reply === "string")
+        return { reply: data.reply, sources: data?.sources };
       throw new Error("Malformed response from proxy");
     } catch (err) {
-      return "(demo) I’m ready to assist with Global Private Equity Real Estate across New York, Toronto, and Riyadh. Connect the backend to enable real replies from the Concierge GPT.";
+      return {
+        reply:
+          "(demo) I’m ready to assist with Global Private Equity Real Estate across New York, Toronto, and Riyadh. Connect the backend to enable real replies from the Concierge GPT.",
+      };
     }
   }
 
@@ -64,20 +137,44 @@ function ConciergeCard() {
     const text = input.trim();
     if (!text || loading) return;
 
-    const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text };
+    // 1) Add user message immediately
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+    };
     setMessages((m) => [...m, userMsg]);
     setInput("");
     inputRef.current?.focus();
-    // Scroll quickly after the DOM paints the new user bubble
     requestAnimationFrame(() => scrollToBottom(true));
 
+    // 2) Add assistant placeholder to stream into
+    const botId = crypto.randomUUID();
+    setMessages((m) => [...m, { id: botId, role: "assistant", content: "" }]);
+
     setLoading(true);
-    const replyText = await callConciergeAPI(text);
-    const botMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: replyText };
-    setMessages((m) => [...m, botMsg]);
-    setLoading(false);
-    // Ensure we scroll to the newest assistant message
-    requestAnimationFrame(() => scrollToBottom(true));
+    try {
+      const result = await streamConciergeAPI(text, (delta) => {
+        setMessages((m) =>
+          m.map((msg) => (msg.id === botId ? { ...msg, content: msg.content + delta } : msg))
+        );
+        requestAnimationFrame(() => scrollToBottom(true));
+      });
+      if (result.sources) {
+        setMessages((m) =>
+          m.map((msg) => (msg.id === botId ? { ...msg, sources: result.sources } : msg))
+        );
+      }
+    } catch (e) {
+      // Fallback to non-streaming mode
+      const { reply, sources } = await callConciergeAPI(text);
+      setMessages((m) =>
+        m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg))
+      );
+    } finally {
+      setLoading(false);
+      requestAnimationFrame(() => scrollToBottom(true));
+    }
   }
 
   // Also auto-scroll whenever messages or loading state changes (catch-all)
@@ -110,15 +207,21 @@ function ConciergeCard() {
           <div className="text-sm text-white/80 md:text-base">How may I assist you?</div>
         ) : (
           messages.map((m) => (
-            <div
-              key={m.id}
-              className={
-                m.role === "user"
-                  ? "ml-auto w-fit max-w-full whitespace-pre-wrap rounded-xl bg-white/80 px-3 py-2 text-sm text-neutral-900"
-                  : "mr-auto w-fit max-w-full whitespace-pre-wrap rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90"
-              }
-            >
-              {m.content}
+            <div key={m.id}>
+              <div
+                className={
+                  m.role === "user"
+                    ? "ml-auto w-fit max-w-full whitespace-pre-wrap rounded-xl bg-white/80 px-3 py-2 text-sm text-neutral-900"
+                    : "mr-auto w-fit max-w-full whitespace-pre-wrap rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90"
+                }
+              >
+                {m.content}
+              </div>
+              {m.role === "assistant" && m.sources && m.sources.length > 0 && (
+                <div className="mt-1 mr-auto w-fit text-[11px] text-white/60">
+                  Sources: {m.sources.join(", ")}
+                </div>
+              )}
             </div>
           ))
         )}
@@ -157,7 +260,17 @@ function ConciergeCard() {
 
       {/* Optional: open the GPT in ChatGPT (auth required) */}
       <div className="mt-3 text-xs text-white/60">
-        Prefer the full ChatGPT experience? <a className="underline" href={GPT_SHARE_URL} target="_blank" rel="noreferrer noopener">Open the Concierge GPT</a>.
+        Prefer the full ChatGPT experience?{' '}
+        <a
+          className="underline"
+          href={GPT_SHARE_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          data-testid="gpt-link"
+        >
+          Open the Concierge GPT
+        </a>
+        .
       </div>
     </motion.div>
   );
@@ -269,7 +382,10 @@ function DevTests() {
     // Test 2: Chat input and button exist
     const input = document.querySelector('[data-testid="chat-input-row"] input') as HTMLInputElement | null;
     const button = document.querySelector('[data-testid="chat-input-row"] button');
-    console.assert(!!input && input.placeholder.includes("Type a request"), "Chat input should be present with placeholder");
+    console.assert(
+      !!input && input.placeholder.includes("Type a request"),
+      "Chat input should be present with placeholder"
+    );
     console.assert(!!button, "Send button should be present");
 
     // Test 3: Tagline text matches
@@ -281,7 +397,8 @@ function DevTests() {
 
     // Test 4: Cities line contains all locations
     const cities = document.querySelector('[data-testid="cities"]');
-    const citiesOk = cities?.textContent?.includes("New York") &&
+    const citiesOk =
+      cities?.textContent?.includes("New York") &&
       cities?.textContent?.includes("Toronto") &&
       cities?.textContent?.includes("Riyadh");
     console.assert(!!citiesOk, "Cities list should include New York, Toronto, Riyadh");
@@ -293,6 +410,18 @@ function DevTests() {
     const timeout = setTimeout(() => {
       const laterTheme = root?.getAttribute("data-theme");
       console.assert(laterTheme === "dark", "Theme should switch to dark after delay");
+
+      // Added Tests — ensure accessibility and link presence
+      // Test 6: chat log is aria-live polite for screen readers
+      const chatLog = document.querySelector('[data-testid="chat-log"]');
+      console.assert(
+        chatLog?.getAttribute("aria-live") === "polite",
+        "Chat log should be aria-live=polite"
+      );
+      // Test 7: GPT link exists
+      const gptLink = document.querySelector('[data-testid="gpt-link"]') as HTMLAnchorElement | null;
+      console.assert(!!gptLink && gptLink.href.includes("chatgpt.com"), "GPT link should be present");
+
       console.groupEnd();
     }, 1200); // allow buffer beyond 900ms
 
