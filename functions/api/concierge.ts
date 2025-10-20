@@ -32,7 +32,31 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const system =
     "You are the Clifton Blake KSA Concierge. Company focus: Global Private Equity Real Estate. " +
     "Primary hubs: New York, Toronto, Riyadh. Be crisp, helpful, and action-oriented.";
-
+// pasted ...inside onRequest, after you have `message` and `system`:
+const r = await fetch("https://api.openai.com/v1/responses", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "gpt-4.1-mini",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: message },
+    ],
+    tools: [
+      {
+        type: "file_search",
+        vector_store_ids: [env.VECTOR_STORE_ID], // <-- your store
+        // optional: max_num_results: 8
+      },
+    ],
+    // optional: tool_choice: "required"  // force retrieval for stricter answers
+  }),
+});
+// end paste
+  
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
