@@ -15,6 +15,10 @@ const PROXY_URL = "/api/concierge"; // ← implement this on your server
 const GPT_SHARE_URL =
   "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
 
+// Path to your logo served by Vite from /public
+// Place the provided file at: public/cb-logo.png
+const LOGO_SRC = "/cb-logo.png";
+
 // Streaming client: expects backend to stream text (SSE/NDJSON/plain chunks)
 async function streamConciergeAPI(
   prompt: string,
@@ -154,19 +158,37 @@ function ConciergeCard() {
 
     setLoading(true);
     try {
+      let gotDelta = false;
       const result = await streamConciergeAPI(text, (delta) => {
+        gotDelta = true;
         setMessages((m) =>
           m.map((msg) => (msg.id === botId ? { ...msg, content: msg.content + delta } : msg))
         );
         requestAnimationFrame(() => scrollToBottom(true));
       });
+
+      // If we didn't receive streaming chunks, use the final text (non-stream JSON path)
+      if (!gotDelta && result.final) {
+        setMessages((m) =>
+          m.map((msg) => (msg.id === botId ? { ...msg, content: result.final } : msg))
+        );
+      }
       if (result.sources) {
         setMessages((m) =>
           m.map((msg) => (msg.id === botId ? { ...msg, sources: result.sources } : msg))
         );
       }
+
+      // If still empty (no delta & no final), fall back once to non-streaming API
+      const botMsg = messages.find((m) => m.id === botId);
+      if (!gotDelta && (!botMsg || !botMsg.content)) {
+        const { reply, sources } = await callConciergeAPI(text);
+        setMessages((m) =>
+          m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg))
+        );
+      }
     } catch (e) {
-      // Fallback to non-streaming mode
+      // Fallback to non-streaming mode on any error
       const { reply, sources } = await callConciergeAPI(text);
       setMessages((m) =>
         m.map((msg) => (msg.id === botId ? { ...msg, content: reply, sources } : msg))
@@ -315,6 +337,18 @@ export default function CorporateWebsite() {
       <main className="grid min-h-screen place-items-center">
         <Container>
           <div className="flex flex-col items-center text-center">
+            {/* Logo */}
+            <motion.img
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.05 }}
+              src={LOGO_SRC}
+              alt="Clifton Blake"
+              className="mb-6 h-10 w-auto md:h-12"
+              data-testid="cb-logo"
+              style={{ filter: !isDark ? "drop-shadow(0 0 4px rgba(0,0,0,0.45))" : "none" }}
+            />
+
             {/* Brand spark */}
             <motion.div
               initial={{ opacity: 0, y: 8 }}
@@ -388,6 +422,10 @@ function DevTests() {
     );
     console.assert(!!button, "Send button should be present");
 
+    // Test 3b: Send should be disabled when input is empty
+    const sendBtn = button as HTMLButtonElement | null;
+    console.assert(!!sendBtn && sendBtn.disabled === true, "Send should be disabled initially when input is empty");
+
     // Test 3: Tagline text matches
     const tagline = document.querySelector('[data-testid="tagline"]');
     console.assert(
@@ -422,6 +460,11 @@ function DevTests() {
       const gptLink = document.querySelector('[data-testid="gpt-link"]') as HTMLAnchorElement | null;
       console.assert(!!gptLink && gptLink.href.includes("chatgpt.com"), "GPT link should be present");
 
+      // Test 8: Logo exists and has src + alt
+      const logo = document.querySelector('[data-testid="cb-logo"]') as HTMLImageElement | null;
+      console.assert(!!logo && !!logo?.getAttribute("src"), "Logo should render with a src");
+      console.assert(!!logo && (logo.alt || "").toLowerCase().includes("clifton"), "Logo should have descriptive alt text");
+
       console.groupEnd();
     }, 1200); // allow buffer beyond 900ms
 
@@ -430,4 +473,3 @@ function DevTests() {
 
   return null;
 }
-//
