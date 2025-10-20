@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PropsWithChildren } from "react";
 import { motion } from "framer-motion";
 import { Bot, Sparkles, Send } from "lucide-react";
@@ -30,28 +30,32 @@ function ConciergeCard() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const logRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  function scrollToBottom(smooth = true) {
+    const log = logRef.current;
+    if (!log) return;
+    const behavior = smooth ? ("smooth" as const) : ("auto" as const);
+    // Scroll container to bottom
+    log.scrollTo({ top: log.scrollHeight, behavior });
+  }
 
   async function callConciergeAPI(prompt: string): Promise<string> {
-    // Try your server proxy. If unavailable, fall back to a local demo reply.
     try {
       const res = await fetch(PROXY_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Optional hint for your backend mapping (not used by OpenAI):
           "X-Concierge-GPT": GPT_SHARE_URL,
         },
         body: JSON.stringify({ message: prompt }),
       });
-
       if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
-
-      // Expect { reply: string } from your backend for now.
       const data = await res.json();
       if (typeof data?.reply === "string") return data.reply;
       throw new Error("Malformed response from proxy");
     } catch (err) {
-      // Fallback demo message so the UI remains usable without a backend.
       return "(demo) I’m ready to assist with Global Private Equity Real Estate across New York, Toronto, and Riyadh. Connect the backend to enable real replies from the Concierge GPT.";
     }
   }
@@ -63,13 +67,23 @@ function ConciergeCard() {
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text };
     setMessages((m) => [...m, userMsg]);
     setInput("");
-    setLoading(true);
+    inputRef.current?.focus();
+    // Scroll quickly after the DOM paints the new user bubble
+    requestAnimationFrame(() => scrollToBottom(true));
 
+    setLoading(true);
     const replyText = await callConciergeAPI(text);
     const botMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: replyText };
     setMessages((m) => [...m, botMsg]);
     setLoading(false);
+    // Ensure we scroll to the newest assistant message
+    requestAnimationFrame(() => scrollToBottom(true));
   }
+
+  // Also auto-scroll whenever messages or loading state changes (catch-all)
+  useEffect(() => {
+    scrollToBottom(false);
+  }, [messages, loading]);
 
   return (
     <motion.div
@@ -85,7 +99,13 @@ function ConciergeCard() {
       </div>
 
       {/* Messages */}
-      <div className="mb-4 max-h-64 space-y-3 overflow-y-auto pr-1" data-testid="chat-log">
+      <div
+        ref={logRef}
+        className="mb-4 max-h-64 space-y-3 overflow-y-auto pr-1 overscroll-contain"
+        data-testid="chat-log"
+        aria-live="polite"
+        aria-atomic="false"
+      >
         {messages.length === 0 ? (
           <div className="text-sm text-white/80 md:text-base">How may I assist you?</div>
         ) : (
@@ -94,8 +114,8 @@ function ConciergeCard() {
               key={m.id}
               className={
                 m.role === "user"
-                  ? "ml-auto w-fit max-w-full rounded-xl bg-white/80 px-3 py-2 text-sm text-neutral-900"
-                  : "mr-auto w-fit max-w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90"
+                  ? "ml-auto w-fit max-w-full whitespace-pre-wrap rounded-xl bg-white/80 px-3 py-2 text-sm text-neutral-900"
+                  : "mr-auto w-fit max-w-full whitespace-pre-wrap rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90"
               }
             >
               {m.content}
@@ -112,6 +132,7 @@ function ConciergeCard() {
       {/* Input */}
       <div className="flex items-center gap-2" data-testid="chat-input-row">
         <input
+          ref={inputRef}
           className="h-11 flex-1 rounded-xl border border-white/15 bg-white/10 px-3 text-white/90 placeholder-white/50 outline-none backdrop-blur-md"
           placeholder="Type a request…"
           value={input}
