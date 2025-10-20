@@ -15,11 +15,24 @@ const PROXY_URL = "/api/concierge"; // ← implement this on your server
 const GPT_SHARE_URL =
   "https://chatgpt.com/g/g-68f05c99bde88191b0bd751c8d3354c7-clifton-blake-ksa-concierge";
 
-// Path to your logo served by Vite from /public
-// Place the provided file at: public/cb-logo.png
-const LOGO_SRC = "/cb-logo.png";
+// Helper: parse a single SSE line; return text delta or null.
+function extractDeltaFromSSELine(line: string): string | null {
+  // Only process data lines; ignore event:, id:, retry:, and blanks
+  if (!/^data:/i.test(line)) return null;
+  const payload = line.replace(/^data:\\s?/i, "").trim();
+  if (!payload || payload === "[DONE]") return null;
+  try {
+    const evt = JSON.parse(payload);
+    if (typeof evt?.delta === "string") return evt.delta;
+    if (typeof evt?.text === "string") return evt.text;
+    return null;
+  } catch {
+    // If it isn't JSON, ignore (do not render event names)
+    return null;
+  }
+}
 
-// Streaming client: expects backend to stream text (SSE/NDJSON/plain chunks)
+// Streaming client: expects backend to stream text (SSE/NDJSON/plain chunks) expects backend to stream text (SSE/NDJSON/plain chunks)
 async function streamConciergeAPI(
   prompt: string,
   onDelta: (chunk: string) => void
@@ -44,53 +57,7 @@ async function streamConciergeAPI(
     let final = "";
     if (!reader) return { final };
     let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      buffer += chunk;
-      // ✅ Correct newlines regex (previous version had corrupted CR/LF chars)
-      const parts = buffer.split(/\r?\n\r?\n|\r?\n/);
-      buffer = parts.pop() || ""; // keep last partial
-      for (const line of parts) {
-        const trimmed = line.replace(/^data:\s?/, "");
-        if (!trimmed) continue;
-        try {
-          const evt = JSON.parse(trimmed);
-          if (typeof evt.delta === "string") {
-            final += evt.delta;
-            onDelta(evt.delta);
-          } else if (typeof evt.text === "string") {
-            final += evt.text;
-            onDelta(evt.text);
-          }
-          // if evt.sources present, we attach after stream ends
-        } catch {
-          final += trimmed;
-          onDelta(trimmed);
-        }
-      }
-    }
-    if (buffer) {
-      final += buffer;
-      onDelta(buffer);
-    }
-    return { final };
-  }
-
-  // Fallback to JSON response
-  const data = await res.json();
-  return {
-    final: data?.reply ?? "",
-    sources: Array.isArray(data?.sources) ? data.sources : undefined,
-  };
-}
-
-function Container({ children }: PropsWithChildren) {
-  return <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">{children}</div>;
-}
-
-// ——— Concierge Chat Types ———
+   — Concierge Chat Types ———
 interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -280,19 +247,20 @@ function ConciergeCard() {
         </button>
       </div>
 
+      {/* Grounded mode toggle */}
+      <label className="mt-2 inline-flex select-none items-center gap-2 text-xs text-white/70" data-testid="grounded-toggle">
+        <input
+          type="checkbox"
+          className="h-3.5 w-3.5 accent-white/80"
+          checked={grounded}
+          onChange={(e) => setGrounded(e.target.checked)}
+        />
+        <span>Grounded mode (use docs only)</span>
+      </label>
+
       {/* Optional: open the GPT in ChatGPT (auth required) */}
       <div className="mt-3 text-xs text-white/60">
-        Prefer the full ChatGPT experience?{' '}
-        <a
-          className="underline"
-          href={GPT_SHARE_URL}
-          target="_blank"
-          rel="noreferrer noopener"
-          data-testid="gpt-link"
-        >
-          Open the Concierge GPT
-        </a>
-        .
+        Prefer the full ChatGPT experience? <a className="underline" href={GPT_SHARE_URL} target="_blank" rel="noreferrer noopener">Open the Concierge GPT</a>.
       </div>
     </motion.div>
   );
@@ -464,6 +432,26 @@ function DevTests() {
       const logo = document.querySelector('[data-testid="cb-logo"]') as HTMLImageElement | null;
       console.assert(!!logo && !!logo?.getAttribute("src"), "Logo should render with a src");
       console.assert(!!logo && (logo.alt || "").toLowerCase().includes("clifton"), "Logo should have descriptive alt text");
+
+      // Fetch server debug to verify vector store wiring (non-blocking)
+      fetch('/api/concierge?debug=1')
+        .then(r => r.ok ? r.json() : null)
+        .then(info => {
+          if (!info) return;
+          console.log('[Debug] /api/concierge?debug=1 →', info);
+          if (info?.hasKey !== true) {
+            console.warn('OPENAI_API_KEY is not bound on the server');
+          }
+          if (info?.vectorStore?.id) {
+            console.assert(
+              typeof info.vectorStore.files === 'number',
+              'Vector store should return a file count'
+            );
+          } else {
+            console.warn('VECTOR_STORE_ID is not configured on the server');
+          }
+        })
+        .catch(() => undefined);
 
       console.groupEnd();
     }, 1200); // allow buffer beyond 900ms
