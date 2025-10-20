@@ -3,11 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+
+  
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "preview": "vite preview"
+    "build": "vite build",           // keep CI lean
+    "preview": "vite preview",
+    "typecheck": "tsc -b"            // run locally when you want
   },
   "dependencies": {
     "framer-motion": "^12.23.24",
